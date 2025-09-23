@@ -36,33 +36,66 @@ class GridRobot:
             return new_x, new_y
         return self.x, self.y
     
-    def execute_90_degree_turn(self, px, direction):
-        """Execute a 90-degree turn in place"""
-        if direction == 'left':
-            # Full lock left
-            px.set_dir_servo_angle(-35)
-            px.forward(self.turn_power)
-            time.sleep(self.turn_90_duration)
-            px.stop()
-            px.set_dir_servo_angle(0)  # Straighten wheels
-            
-            # Update orientation
-            orientations = ['north', 'west', 'south', 'east']
-            idx = orientations.index(self.orientation)
-            self.orientation = orientations[(idx + 1) % 4]
-            
-        elif direction == 'right':
-            # Full lock right
-            px.set_dir_servo_angle(35)
-            px.forward(self.turn_power)
-            time.sleep(self.turn_90_duration)
-            px.stop()
-            px.set_dir_servo_angle(0)
-            
-            # Update orientation
-            orientations = ['north', 'east', 'south', 'west']
-            idx = orientations.index(self.orientation)
-            self.orientation = orientations[(idx + 1) % 4]
+    # In robot_controller.py, REPLACE the execute_90_degree_turn method (around lines 35-56) with:
+
+def execute_90_degree_turn(self, px, direction):
+    """
+    Execute a 90-degree turn using backward-forward technique
+    This creates a much tighter turning radius
+    """
+    if direction == 'left':
+        print("  Executing 90° left turn (backward-forward technique)...")
+        
+        # Phase 1: Backward with right steering
+        px.set_dir_servo_angle(30)  # Steer right
+        px.backward(30)  # Go backward
+        time.sleep(0.5)
+        
+        # Phase 2: Forward with left steering  
+        px.set_dir_servo_angle(-35)  # Steer left
+        px.forward(30)
+        time.sleep(0.8)
+        
+        # Phase 3: Additional forward to complete turn if needed
+        px.set_dir_servo_angle(-30)
+        px.forward(25)
+        time.sleep(0.3)
+        
+        # Stop and straighten
+        px.stop()
+        px.set_dir_servo_angle(0)
+        
+        # Update orientation
+        orientations = ['north', 'west', 'south', 'east']
+        idx = orientations.index(self.orientation)
+        self.orientation = orientations[(idx + 1) % 4]
+        
+    elif direction == 'right':
+        print("  Executing 90° right turn (backward-forward technique)...")
+        
+        # Phase 1: Backward with left steering
+        px.set_dir_servo_angle(-30)  # Steer left
+        px.backward(30)  # Go backward
+        time.sleep(0.5)
+        
+        # Phase 2: Forward with right steering
+        px.set_dir_servo_angle(35)  # Steer right
+        px.forward(30)
+        time.sleep(0.8)
+        
+        # Phase 3: Additional forward to complete turn if needed
+        px.set_dir_servo_angle(30)
+        px.forward(25)
+        time.sleep(0.3)
+        
+        # Stop and straighten
+        px.stop()
+        px.set_dir_servo_angle(0)
+        
+        # Update orientation
+        orientations = ['north', 'east', 'south', 'west']
+        idx = orientations.index(self.orientation)
+        self.orientation = orientations[(idx + 1) % 4]
     
     def move_forward_one_cell(self, px):
         """Move forward approximately one grid cell"""
@@ -157,4 +190,5 @@ class ActionPlanner:
             
             current_orientation = required_orientation
         
+
         return actions

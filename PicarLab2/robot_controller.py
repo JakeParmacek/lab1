@@ -1,18 +1,26 @@
 import time
 
 class GridRobot:
-    def __init__(self, width=25, height=25):
-        self.x = width // 2  # Start center-bottom
-        self.y = height - 1
-        self.width = width
-        self.height = height
-        self.orientation = 'north'  # Facing up initially
-        
-        # Calibration parameters
-        self.turn_90_duration = 0.8  # Time for 90-degree turn (needs tuning)
-        self.cell_forward_duration = 0.5  # Time to move one cell (needs tuning)
-        self.turn_power = 25
-        self.forward_power = 30
+    # In robot_controller.py, UPDATE the __init__ method (around lines 5-14):
+
+def __init__(self, width=25, height=25):
+    self.x = width // 2  # Start center-bottom
+    self.y = height - 1
+    self.width = width
+    self.height = height
+    self.orientation = 'north'  # Facing up initially
+    
+    # Calibration parameters for backward-forward turning
+    self.turn_backward_duration = 0.5  # Time for backward phase
+    self.turn_forward_duration = 0.8   # Time for forward phase
+    self.turn_final_duration = 0.3     # Final adjustment
+    self.turn_backward_power = 30
+    self.turn_forward_power = 30
+    self.turn_final_power = 25
+    
+    # Forward movement calibration
+    self.cell_forward_duration = 0.5  # Time to move one cell
+    self.forward_power = 30
         
     def get_next_cell(self, action='forward'):
         """Get the cell we'd move to with given action"""
@@ -192,3 +200,4 @@ class ActionPlanner:
         
 
         return actions
+

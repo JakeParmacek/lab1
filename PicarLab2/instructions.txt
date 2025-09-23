@@ -1,0 +1,29 @@
+Running Instructions
+
+First, run calibration to find correct timing values:
+
+bash   python3 calibration.py
+
+Update the timing values in robot_controller.py with your calibration results:
+
+self.turn_90_duration
+self.cell_forward_duration
+
+
+Run the main navigation:
+
+bash   python3 main_discrete_nav.py
+Key Features
+
+Modular design - Easy to modify individual components
+Discrete 90° turns - More predictable than continuous steering
+Safety checks - Emergency stop if obstacles detected
+Limited actions per iteration - Rescans every 5 actions for better reactivity
+Calibration script - Tune your specific robot's movement
+
+Tuning Tips
+
+Start with the calibration script to get base timings
+Adjust EMERGENCY_STOP_CM based on your robot's stopping distance
+Modify actions_executed >= 5 to control replanning frequency
+Tune turn_power and forward_power for your surface type

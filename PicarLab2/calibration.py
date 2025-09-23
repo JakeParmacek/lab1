@@ -7,29 +7,55 @@ Run this to find the correct timing values for your robot
 import time
 from picarx import Picarx
 
+# In calibration.py, REPLACE the calibrate_90_turn function with:
+
 def calibrate_90_turn(px):
-    """Find the duration needed for a 90-degree turn"""
-    print("\nCalibrating 90-degree turn...")
-    print("The robot will attempt turns with different durations.")
-    print("Watch and note which duration gives closest to 90 degrees.\n")
+    """Find the durations needed for a 90-degree turn using backward-forward technique"""
+    print("\nCalibrating 90-degree turn using backward-forward technique...")
+    print("The robot will attempt turns with different timing combinations.")
+    print("Watch and note which gives closest to 90 degrees.\n")
     
-    test_durations = [0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2]
+    # Test different timing combinations
+    test_configs = [
+        (0.4, 0.6, 0.2),  # (backward_time, forward_time, final_time)
+        (0.5, 0.7, 0.3),
+        (0.5, 0.8, 0.3),
+        (0.6, 0.8, 0.4),
+        (0.6, 0.9, 0.4),
+    ]
     
-    for duration in test_durations:
-        input(f"Press Enter to test {duration}s turn...")
+    for back_t, fwd_t, final_t in test_configs:
+        input(f"\nPress Enter to test: back={back_t}s, fwd={fwd_t}s, final={final_t}s...")
         
-        # Test left turn
-        print(f"Testing LEFT turn for {duration}s")
+        print(f"Testing LEFT turn...")
+        
+        # Phase 1: Backward with right steering
+        px.set_dir_servo_angle(30)
+        px.backward(30)
+        time.sleep(back_t)
+        
+        # Phase 2: Forward with left steering
         px.set_dir_servo_angle(-35)
+        px.forward(30)
+        time.sleep(fwd_t)
+        
+        # Phase 3: Final adjustment
+        px.set_dir_servo_angle(-30)
         px.forward(25)
-        time.sleep(duration)
+        time.sleep(final_t)
+        
+        # Stop and straighten
         px.stop()
         px.set_dir_servo_angle(0)
         
         time.sleep(2)
-        
-    best = float(input("Enter best duration for 90-degree turn: "))
-    return best
+    
+    print("\nEnter best timing values:")
+    back_best = float(input("Best backward duration (s): "))
+    fwd_best = float(input("Best forward duration (s): "))
+    final_best = float(input("Best final adjustment duration (s): "))
+    
+    return back_best, fwd_best, final_best
 
 def calibrate_forward_cell(px, cell_size_cm=5):
     """Find the duration needed to move forward one cell"""
@@ -77,4 +103,5 @@ def main():
         px.stop()
 
 if __name__ == "__main__":
+
     main()

@@ -203,9 +203,9 @@ class EgocentricGrid:
                                 inf[rr, cc] = OCC
         # Inflate map borders
         inf[0, :] = OCC
-        inf[:, 0] = OCC
-        inf[self.h - 1, :] = OCC
-        inf[:, self.w - 1] = OCC
+        inf[:, self.w -1] = OCC
+        far_row = self.h - 1
+        inf[far_row, :] = OCC
         self.inflated = inf
 
     def shift_after_forward(self, cells=1):
@@ -246,11 +246,12 @@ def a_star_path(inflated_grid, start_xy, goal_xy):
     def in_bounds(x, y):
         return GRID_X_MIN <= x <= GRID_X_MAX and GRID_Y_MIN <= y <= GRID_Y_MAX
 
-    def is_free(x, y):
+    def is_traversable(x, y):
         r, c = y - GRID_Y_MIN, x - GRID_X_MIN
         if not (0 <= r < h and 0 <= c < w):
             return False
-        return inflated_grid[r, c] == FREE
+        v= inflated_grid[r, c]
+        return v != OCC
 
     if not in_bounds(gx, gy):
         return []
@@ -264,46 +265,39 @@ def a_star_path(inflated_grid, start_xy, goal_xy):
     start = (sx, sy)
     goal = (gx, gy)
 
-    def manhattan(a, b):
-        return abs(a[0] - b[0]) + abs(a[1] - b[1])
-
     import heapq
+    def manhattan(a, b): return abs(a[0]-b[0]) + abs(a[1]-b[1])
+
+    open_set = []
     heapq.heappush(open_set, (manhattan(start, goal), 0, start))
-    gscore[start] = 0
-    fscore[start] = manhattan(start, goal)
+    came, gscore = {}, {start: 0}
 
     def neighbors(node):
         x, y = node
-        for dx, dy in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
-            nx, ny = x + dx, y + dy
+        for dx, dy in [(0,1), (1,0), (0,-1), (-1,0)]:
+            nx, ny = x+dx, y+dy
             if not in_bounds(nx, ny):
                 continue
-            r, c = ny - GRID_Y_MIN, nx - GRID_X_MIN
-            v = inflated_grid[r, c]
-            if v == FREE or (nx, ny) == goal:
+            if is_traversable(nx, ny) or (nx, ny) == goal:
                 yield (nx, ny)
 
     while open_set:
         _, g, cur = heapq.heappop(open_set)
         if cur == goal:
-            # reconstruct
             path = [cur]
             while cur in came:
                 cur = came[cur]
                 path.append(cur)
-            path.reverse()
-            return path
-
+            return list(reversed(path))
         for nb in neighbors(cur):
-            tentative = g + 1
-            if tentative < gscore.get(nb, 1e9):
+            ng = g + 1
+            if ng < gscore.get(nb, 1e9):
                 came[nb] = cur
-                gscore[nb] = tentative
-                f = tentative + manhattan(nb, goal)
-                fscore[nb] = f
-                heapq.heappush(open_set, (f, tentative, nb))
+                gscore[nb] = ng
+                heapq.heappush(open_set, (ng + manhattan(nb, goal), ng, nb))
+    return []
 
-    return []  # no path
+        
 
 # ---------- Scanner ----------
 class Scanner:
@@ -457,6 +451,7 @@ def main():
         # 3) Plan
         path = a_star_path(grid.inflated, (0, 0), goal)
         print("A* path:", path)
+        print(grid)
 
         # Reached?
         if path and len(path) == 1 and path[0] == (0, 0) and goal == (0, 0):

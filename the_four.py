@@ -7,20 +7,21 @@ import numpy as np
 from picarx import Picarx
 
 # ----------------- Config (tune on robot) -----------------
-CELL_CM = 20
-GRID_X_MIN, GRID_X_MAX = -5, 5    # x in [-5..5]
-GRID_Y_MIN, GRID_Y_MAX = 0, 10    # y in [0..10]
+CELL_CM = 30
+GRID_X_MIN, GRID_X_MAX = -2, 2    # x in [-5..5]
+GRID_Y_MIN, GRID_Y_MAX = 0, 5    # y in [0..10]
 FREE, OCC = 0, 1                  # unknown treated as FREE
 
 SCAN_MIN_DEG = -45
 SCAN_MAX_DEG = 45
 SCAN_STEP_DEG = 2
-MAX_RANGE_CM = 100
+MAX_RANGE_CM = 50
 
 SPEED_FORWARD = 30
 SPEED_BACKWARD = 30
-T_FORWARD_CELL_SEC = 0.7
-T_BACKWARD_CELL_SEC = 0.7
+T_FORWARD_CELL_SEC = 1.2
+T_BACKWARD_CELL_SEC = 1.2
+T_FORWARD_TURN_SEC = 0.32
 STEER_MAX_DEG = 30
 TURN_LEFT_SEQ = (0.5, 1.4, 1.3)
 TURN_RIGHT_SEQ = (0.5, 1.3, 1.3)
@@ -179,6 +180,13 @@ def forward_one(px: Picarx):
     time.sleep(T_FORWARD_CELL_SEC)
     px.stop()
 
+
+def forward_turn(px: Picarx):
+    px.set_dir_servo_angle(0)
+    px.forward(SPEED_FORWARD)
+    time.sleep(T_FORWARD_TURN_SEC)
+    px.stop()
+
 def backward_one(px: Picarx):
     px.set_dir_servo_angle(0)
     px.backward(SPEED_BACKWARD)
@@ -211,11 +219,11 @@ def execute_step(px: Picarx, cur, nxt, current_heading):
             return "North"
         elif (dx, dy) == (-1, 0):  # left turn + forward
             three_point_left(px)
-            forward_one(px)
+            forward_turn(px)
             return "West"
         elif (dx, dy) == (1, 0):   # right turn + forward
             three_point_right(px)
-            forward_one(px)
+            forward_turn(px)
             return "East"
         elif (dx, dy) == (0, -1):  # backward
             backward_one(px)
@@ -228,11 +236,11 @@ def execute_step(px: Picarx, cur, nxt, current_heading):
             return "East"
         elif (dx, dy) == (0, 1):  # left turn + forward (north)
             three_point_left(px)
-            forward_one(px)
+            forward_turn(px)
             return "North"
         elif (dx, dy) == (0, -1):   # right turn + forward (south)
             three_point_right(px)
-            forward_one(px)
+            forward_turn(px)
             return "South"
         elif (dx, dy) == (-1, 0):  # backward (west)
             backward_one(px)
@@ -245,11 +253,11 @@ def execute_step(px: Picarx, cur, nxt, current_heading):
             return "South"
         elif (dx, dy) == (1, 0):  # left turn + forward (east)
             three_point_left(px)
-            forward_one(px)
+            forward_turn(px)
             return "East"
         elif (dx, dy) == (-1, 0):   # right turn + forward (west)
             three_point_right(px)
-            forward_one(px)
+            forward_turn(px)
             return "West"
         elif (dx, dy) == (0, 1):  # backward (north)
             backward_one(px)
@@ -262,11 +270,11 @@ def execute_step(px: Picarx, cur, nxt, current_heading):
             return "West"
         elif (dx, dy) == (0, -1):  # left turn + forward (south)
             three_point_left(px)
-            forward_one(px)
+            forward_turn(px)
             return "South"
         elif (dx, dy) == (0, 1):   # right turn + forward (north)
             three_point_right(px)
-            forward_one(px)
+            forward_turn(px)
             return "North"
         elif (dx, dy) == (1, 0):  # backward (east)
             backward_one(px)
@@ -339,7 +347,7 @@ def main():
 
         # Before moving, sweep and check if any cell on path up to a small horizon is blocked
         sweep_and_update(px, g)
-        horizon = min(3, len(path)-1)  # Reduced horizon for quicker response
+        horizon = min(2, len(path)-1)  # Reduced horizon for quicker response
         blocked = False
         blocked_at = None
         for i in range(1, horizon+1):

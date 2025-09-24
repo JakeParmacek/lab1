@@ -18,12 +18,12 @@ SCAN_STEP_DEG = 2
 MAX_RANGE_CM = 100
 
 SPEED_FORWARD = 30
-SPEED_BACKWARD = 25
-T_FORWARD_CELL_SEC = 0.80
-T_BACKWARD_CELL_SEC = 0.90
+SPEED_BACKWARD = 30
+T_FORWARD_CELL_SEC = 0.7
+T_BACKWARD_CELL_SEC = 0.7
 STEER_MAX_DEG = 30
-TURN_LEFT_SEQ = (0.45, 0.40, 0.35)
-TURN_RIGHT_SEQ = (0.45, 0.40, 0.35)
+TURN_LEFT_SEQ = (0.5, 1.4, 1.3)
+TURN_RIGHT_SEQ = (0.5, 1.3, 1.3)
 
 # ----------------- Grid -----------------
 class Grid:
@@ -50,7 +50,7 @@ class Grid:
             self.grid[r, c] = FREE
 
 # ----------------- A* (4-connected, unknown==free) -----------------
-def astar(grid: Grid, start, goal):
+def astar(grid: Grid, start, goal, heading = "North"):
     sx, sy = start
     gx, gy = goal
     if not (grid.in_bounds_xy(gx, gy) and grid.in_bounds_xy(sx, sy)):
@@ -60,35 +60,55 @@ def astar(grid: Grid, start, goal):
         r, c = grid.world_to_idx(x, y)
         return grid.grid[r, c] != OCC
 
-    def h(a, b):
-        return abs(a[0]-b[0]) + abs(a[1]-b[1])
+    def heuristic(p, q):
+        (px, py) = p
+        (qx, qy) = q
+        return abs(px - qx) + abs(py - qy)
+
+    def turn_penalty(from_heading, to_heading):
+        return 0 if from_heading == to_heading else 2
+
+    def heading_to(from_pos, to_pos):
+        dx = to_pos[0] - from_pos[0]
+        dy = to_pos[1] - from_pos[1]
+        if dx == 0 and dy == 1: return "north"
+        if dx == 1 and dy == 0: return "east"
+        if dx == 0 and dy == -1: return "south"
+        if dx == -1 and dy == 0: return "west"
+        return "unknown"
 
     openq = []
-    heapq.heappush(openq, (h(start, goal), 0, start))
+    heapq.heappush(openq, (heuristic(start, goal), 0, start, heading))
     came = {}
-    gscore = {start: 0}
+    gscore = {(start, heading): 0}
 
-    def neigh(n):
-        x, y = n
+    def neighbors(node):
+        x, y = node
         for dx, dy in ((0,1),(1,0),(0,-1),(-1,0)):
-            nx, ny = x+dx, y+dy
-            if grid.in_bounds_xy(nx, ny) and (is_free(nx, ny) or (nx, ny)==goal):
+            nx, ny = x + dx, y + dy
+            if grid.in_bounds_xy(nx, ny) and (is_free(nx, ny) or (nx, ny) == goal):
                 yield (nx, ny)
 
     while openq:
-        _, g, cur = heapq.heappop(openq)
+        f_score, g, cur, cur_h = heapq.heappop(openq)
         if cur == goal:
             path = [cur]
-            while cur in came:
-                cur = came[cur]
+            key = (cur, cur_h)
+            while key in came:
+                cur, cur_h = came[key]
                 path.append(cur)
+                key = (cur, cur_h)
             return list(reversed(path))
-        for nb in neigh(cur):
-            ng = g + 1
-            if ng < gscore.get(nb, 1e9):
-                came[nb] = cur
-                gscore[nb] = ng
-                heapq.heappush(openq, (ng + h(nb, goal), ng, nb))
+
+        for nb in neighbors(cur):
+            new_h = heading_to(cur, nb)
+            ng = g + 1 + turn_penalty(cur_h, new_h)
+            key_nb = (nb, new_h)
+            if ng < gscore.get(key_nb, 1e9):
+                came[key_nb] = (cur, cur_h)
+                gscore[key_nb] = ng
+                f_new = ng + heuristic(nb, goal)
+                heapq.heappush(openq, (f_new, ng, nb, new_h))
     return []
 
 # ----------------- Scan and integrate -----------------
@@ -143,30 +163,92 @@ def backward_one(px: Picarx):
 
 def three_point_left(px: Picarx):
     t1,t2,t3 = TURN_LEFT_SEQ
-    px.set_dir_servo_angle(+STEER_MAX_DEG); px.forward(SPEED_FORWARD); time.sleep(t1); px.stop()
-    px.set_dir_servo_angle(-STEER_MAX_DEG); px.backward(SPEED_BACKWARD); time.sleep(t2); px.stop()
-    px.set_dir_servo_angle(+STEER_MAX_DEG); px.forward(SPEED_FORWARD); time.sleep(t3); px.stop()
-    px.set_dir_servo_angle(0)
-
-def three_point_right(px: Picarx):
-    t1,t2,t3 = TURN_RIGHT_SEQ
-    px.set_dir_servo_angle(-STEER_MAX_DEG); px.forward(SPEED_FORWARD); time.sleep(t1); px.stop()
+    px.forward(SPEED_FORWARD); time.sleep(t1); px.stop()
     px.set_dir_servo_angle(+STEER_MAX_DEG); px.backward(SPEED_BACKWARD); time.sleep(t2); px.stop()
     px.set_dir_servo_angle(-STEER_MAX_DEG); px.forward(SPEED_FORWARD); time.sleep(t3); px.stop()
     px.set_dir_servo_angle(0)
 
+def three_point_right(px: Picarx):
+    t1,t2,t3 = TURN_RIGHT_SEQ
+    px.forward(SPEED_FORWARD); time.sleep(t1); px.stop()
+    px.set_dir_servo_angle(-STEER_MAX_DEG); px.backward(SPEED_BACKWARD); time.sleep(t2); px.stop()
+    px.set_dir_servo_angle(+STEER_MAX_DEG); px.forward(SPEED_FORWARD); time.sleep(t3); px.stop()
+    px.set_dir_servo_angle(0)
+
 # Ego heading is +y; decide primitive for next step (dx,dy)
-def execute_step(px: Picarx, cur, nxt):
+def execute_step(px: Picarx, cur, nxt, current_heading):
     dx, dy = nxt[0]-cur[0], nxt[1]-cur[1]
-    if (dx, dy) == (0, 1):   # forward
-        forward_one(px); return "FWD"
-    if (dx, dy) == (-1, 0):  # left turn + forward
-        three_point_left(px); forward_one(px); return "L+F"
-    if (dx, dy) == (1, 0):   # right turn + forward
-        three_point_right(px); forward_one(px); return "R+F"
-    if (dx, dy) == (0, -1):  # backward 1
-        backward_one(px); return "BACK"
-    return "NONE"
+    
+    # Calculate what direction we need to move relative to current heading
+    if current_heading == "North":
+        # Car facing north (+y), so (dx, dy) is relative to north
+        if (dx, dy) == (0, 1):   # forward
+            forward_one(px)
+            return "North"
+        elif (dx, dy) == (-1, 0):  # left turn + forward
+            three_point_left(px)
+            forward_one(px)
+            return "West"
+        elif (dx, dy) == (1, 0):   # right turn + forward
+            three_point_right(px)
+            forward_one(px)
+            return "East"
+        elif (dx, dy) == (0, -1):  # backward
+            backward_one(px)
+            return "South"
+            
+    elif current_heading == "East":
+        # Car facing east (+x), so (dx, dy) needs to be rotated
+        if (dx, dy) == (1, 0):   # forward (east)
+            forward_one(px)
+            return "East"
+        elif (dx, dy) == (0, 1):  # left turn + forward (north)
+            three_point_left(px)
+            forward_one(px)
+            return "North"
+        elif (dx, dy) == (0, -1):   # right turn + forward (south)
+            three_point_right(px)
+            forward_one(px)
+            return "South"
+        elif (dx, dy) == (-1, 0):  # backward (west)
+            backward_one(px)
+            return "West"
+            
+    elif current_heading == "South":
+        # Car facing south (-y)
+        if (dx, dy) == (0, -1):   # forward (south)
+            forward_one(px)
+            return "South"
+        elif (dx, dy) == (1, 0):  # left turn + forward (east)
+            three_point_left(px)
+            forward_one(px)
+            return "East"
+        elif (dx, dy) == (-1, 0):   # right turn + forward (west)
+            three_point_right(px)
+            forward_one(px)
+            return "West"
+        elif (dx, dy) == (0, 1):  # backward (north)
+            backward_one(px)
+            return "North"
+            
+    elif current_heading == "West":
+        # Car facing west (-x)
+        if (dx, dy) == (-1, 0):   # forward (west)
+            forward_one(px)
+            return "West"
+        elif (dx, dy) == (0, -1):  # left turn + forward (south)
+            three_point_left(px)
+            forward_one(px)
+            return "South"
+        elif (dx, dy) == (0, 1):   # right turn + forward (north)
+            three_point_right(px)
+            forward_one(px)
+            return "North"
+        elif (dx, dy) == (1, 0):  # backward (east)
+            backward_one(px)
+            return "East"
+    
+    return current_heading  # no movement
 
 # ----------------- Main loop (barebones) -----------------
 def main():
@@ -188,11 +270,13 @@ def main():
         print("Invalid. Try again (e.g., 2 5):")
 
     cur = (0, 0)
+    heading = "North"
 
     while True:
         # Plan
-        path = astar(g, cur, goal)
+        path = astar(g, cur, goal, heading)
         print("Path:", path)
+        print(g.grid)
 
         if not path:
             print("No path. Scanning to update map...")
@@ -224,10 +308,11 @@ def main():
 
         # Execute one step
         nxt = path[1]
-        tag = execute_step(px, cur, nxt)
-        print("Move:", tag, "to", nxt)
+        dx, dy = nxt[0]-cur[0], nxt[1]-cur[1]
+        new_heading = execute_step(px, cur, nxt, heading)
+        print("Move:", (dx, dy), "to", nxt, "new heading:", new_heading)
         cur = nxt
-
+        heading = new_heading
         time.sleep(0.05)
 
 if __name__ == "__main__":

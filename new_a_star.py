@@ -1,3 +1,26 @@
+# -*- coding: utf-8 -*-
+"""
+A* grid planner + executor for Picar-X (single file, mapper excluded).
+
+What this file does:
+- Prompts for a destination GRID CELL (gx, gy)
+- Scans via your existing `build_map(...)` (function NOT defined here)
+- Inflates obstacles forward-biased, gates forward steps with a corridor check
+- Adds a tiny turn penalty to reduce zig-zags
+- Executes steps with:
+    * forward cell moves
+    * gentle lane changes (optional)
+    * 3-point 90° turn: reverse ±30°, then forward ∓30°
+- After EVERY move, prints current pose in cells & centimeters, cells remaining,
+  and metric distance-to-go. Uses a cm-threshold "arrived" condition.
+
+Intentionally NOT included here (expected to exist elsewhere in your project):
+- build_map(px, width, height, res_cm)
+- polar_to_xy(...)
+- world_to_grid(...)
+
+Author: you + ChatGPT
+"""
 
 import time
 import math
@@ -5,76 +28,67 @@ import heapq
 import numpy as np
 import cv2
 
-from picarx import Picarx
+from picarx import Picarx  # SunFounder Picar-X API
 
 # =========================
-# Global constants (TUNE ME)
+# Tunables / constants
 # =========================
-WIDTH        = 20          # grid columns
-HEIGHT       = 20          # grid rows
-RES_CM       = 5.0         # cm per grid cell
-MAX_RANGE_CM = 100.0       # ultrasonic cutoff
-PAN_SETTLE_SEC = 0.10
+WIDTH        = 20        # grid columns
+HEIGHT       = 20        # grid rows
+RES_CM       = 5.0       # centimeters per grid cell
+MAX_RANGE_CM = 100.0     # (used by your mapper; here for reference)
+PAN_SETTLE_SEC = 0.10    # (used by your mapper; here for reference)
 
-INFLATE_SIDE_CELLS = 1     # grow obstacles sideways (cells)
-INFLATE_FWD_CELLS  = 3     # grow obstacles forward (+y in world, -row in grid here)
-INFLATE_BACK_CELLS = 1
+# Costmap inflation (forward-biased)
+INFLATE_SIDE_CELLS = 1   # grow obstacles sideways (cells)
+INFLATE_FWD_CELLS  = 3   # grow obstacles forward (cells)
+INFLATE_BACK_CELLS = 1   # grow obstacles backward (cells)
 
-LOOKAHEAD_ROWS = 3         # how many rows ahead must be clear to allow forward step
-SIDE_PAD_COLS  = 1         # corridor half-width for lookahead
+# A* neighbor rules
+LOOKAHEAD_ROWS = 3       # corridor depth required to allow a 'forward' expansion
+SIDE_PAD_COLS  = 1       # half-width of corridor (columns) for that check
+TURN_PENALTY   = 0.10    # tiny cost for changing direction (reduces zig-zag)
 
-TURN_PENALTY   = 0.10      # tiny penalty on direction change in A*
+# Driving / steering timing — CALIBRATE on your floor
+DRIVE_POWER     = 40         # px.forward()/backward() power (0..100)
+TIME_PER_CM     = 0.04       # seconds to drive 1 cm at DRIVE_POWER when steering ~0°
+STEER_SETTLE_S  = 0.08       # seconds to let steering servo settle after set
+CELL_RUNUP_CM   = RES_CM     # forward distance for one "cell step"
 
-# Driving / steering (TUNE ME)
-DRIVE_POWER     = 40       # px.forward() power (0..100)
-STEER_SETTLE_S  = 0.08     # wait after changing steering angle
-TIME_PER_CM     = 0.04     # seconds to drive 1cm at DRIVE_POWER when angle ≈ 0°
-CELL_RUNUP_CM   = RES_CM   # how far to drive for a "forward cell" action
+# Lane-change S-curve (kept for gentle lateral shifts)
+LANE_STEER_DEG  = 22         # ±deg for S-curve
+LANE_SPLIT_1    = 0.55       # time fraction of first arc
+LANE_SPLIT_2    = 0.45       # time fraction of second arc
 
-# Lane change S-curve (still used for gentle lateral shifts, optional)
-LANE_STEER_DEG  = 22       # ±deg for S-curve segments
-LANE_SPLIT_1    = 0.55     # first arc fraction of cell distance time
-LANE_SPLIT_2    = 0.45     # second arc fraction
+# 3-point 90° maneuver (your request)
+THREE_PT_STEER_DEG = 30      # ±30° while reversing/forwarding
+THREE_PT_TIME_S    = 0.60    # seconds for each leg; tune to achieve ~90° heading change
 
-# 3-point 90° turn (your requested behavior)
-THREE_PT_STEER_DEG = 30    # ±30° steering while reversing/forwarding
-THREE_PT_TIME_S    = 0.60  # seconds for each leg (back then forward). Tune on floor.
+# “Arrived” when within this many cm of the destination (set ~0.8 cell)
+ARRIVE_CM = RES_CM * 0.8
 
-# Discrete steering labels (not strictly needed now but kept for clarity)
-LEFT_DEG     = -LANE_STEER_DEG
-RIGHT_DEG    = +LANE_STEER_DEG
-STRAIGHT_DEG = 0
-
-
-
-
-
+# =========================
+# Costmap inflation (forward-biased)
+# =========================
 def inflate_obstacles(grid, side_cells=INFLATE_SIDE_CELLS, fwd_cells=INFLATE_FWD_CELLS, back_cells=INFLATE_BACK_CELLS):
     """
-    Forward-biased dilation. We treat obstacles as "casting a shadow" in the forward
-    direction (robot-forward = -row in our grid when moving toward smaller y).
-
-    Implementation detail: we build a rectangular structuring element sized to the
-    requested span and apply a dilation. Simpler and faster than manual loops.
+    Forward-biased morphological dilation. Obstacles cast a 'shadow' ahead
+    to discourage late forward moves near them.
     """
-    # Rectangular kernel that spans sideways and fore/back
     k_h = fwd_cells + 1 + back_cells
     k_w = 2 * side_cells + 1
     kernel = np.ones((k_h, k_w), np.uint8)
-
-    # Apply dilation
-    inflated = cv2.dilate(grid.astype(np.uint8), kernel, iterations=1)
-    return inflated
+    return cv2.dilate(grid.astype(np.uint8), kernel, iterations=1)
 
 # =========================
 # A* on 4-connected grid (with forward gating + turn penalty)
 # =========================
-# 4-connected motions: (dy, dx, step_cost)
+# Motions: (dy, dx, step_cost); note: "forward" in grid is (dy=-1, dx=0)
 MOTIONS = [
-    ( 0,  1, 1.0),  # right
-    ( 1,  0, 1.0),  # down (toward robot)
-    ( 0, -1, 1.0),  # left
-    (-1,  0, 1.0),  # up (forward)
+    ( 0,  1, 1.0),  # right (E)
+    ( 1,  0, 1.0),  # down  (toward robot, S)
+    ( 0, -1, 1.0),  # left  (W)
+    (-1,  0, 1.0),  # up    (forward, N)
 ]
 
 def manhattan(ax, ay, bx, by):
@@ -82,8 +96,8 @@ def manhattan(ax, ay, bx, by):
 
 def forward_clear(grid, x, y):
     """
-    Allow the forward neighbor (dy=-1, dx=0) only if a small corridor
-    ahead is free for LOOKAHEAD_ROWS and +/- SIDE_PAD_COLS columns.
+    Allow the forward neighbor (dy=-1, dx=0) only if a corridor ahead is free for
+    LOOKAHEAD_ROWS and ±SIDE_PAD_COLS columns.
     """
     H, W = grid.shape
     y0 = max(0, y - LOOKAHEAD_ROWS)
@@ -109,7 +123,7 @@ def a_star(grid, start, goal):
     openpq = []
     g_cost = { (sy, sx): 0.0 }
     came   = {}
-    last_mv = { (sy, sx): None }  # track last motion (dy,dx)
+    last_mv = { (sy, sx): None }  # store last (dy,dx) used to reach a node
 
     f0 = manhattan(sx, sy, gx, gy)
     heapq.heappush(openpq, (f0, 0.0, (sy, sx)))
@@ -129,11 +143,11 @@ def a_star(grid, start, goal):
             if not inb(ny, nx) or blocked(ny, nx):
                 continue
 
-            # Gate the "forward" step (dy=-1, dx=0)
+            # Gate forward motion with corridor check
             if dy == -1 and dx == 0 and not forward_clear(grid, x, y):
                 continue
 
-            # Add small penalty for turning (prefers straighter runs)
+            # Add tiny penalty on direction change
             prev = last_mv[(y, x)]
             penalty = TURN_PENALTY if (prev is not None and prev != (dy, dx)) else 0.0
             ng = gc + step_cost + penalty
@@ -155,34 +169,12 @@ def _reconstruct_path(came, node):
     return path
 
 # =========================
-# Goal utilities
-# =========================
-def destination_to_goal_cell(dest_x_cm, dest_y_cm, width, height, res_cm):
-    gx, gy = world_to_grid(dest_x_cm, dest_y_cm, height, width, res_cm)
-    return (gy, gx)
-
-def nearest_free_cell(costmap, gy, gx, max_radius=10):
-    """
-    If requested goal cell is blocked, search outward in Manhattan rings for nearest free cell.
-    """
-    h, w = costmap.shape
-    if 0 <= gy < h and 0 <= gx < w and costmap[gy, gx] == 0:
-        return (gy, gx)
-    for r in range(1, max_radius + 1):
-        for dy in range(-r, r + 1):
-            dx = r - abs(dy)
-            for sx, sy in ((gx + dx, gy + dy), (gx - dx, gy + dy)):
-                if 0 <= sy < h and 0 <= sx < w and costmap[sy, sx] == 0:
-                    return (sy, sx)
-    return None
-
-# =========================
 # Helpers: pose/units
 # =========================
 def cell_to_world_cm(cell_y, cell_x, start_y, start_x, res_cm):
     """
     Convert current cell (y,x) displacement from start cell into (x_cm, y_cm)
-    in the robot's start-centered frame: x right (+), y forward (+).
+    in a robot-start-centered frame: x right (+), y forward (+).
     """
     dx_cells = (cell_x - start_x)           # +right
     dy_cells = (start_y - cell_y)           # moving "up" (toward smaller y index) is +forward
@@ -208,7 +200,7 @@ def drive_forward_cell(px):
 
 def lane_change(px, right=True):
     """
-    Gentle lateral shift that ends straight (optional; still useful for small E/W moves).
+    Gentle lateral shift that ends straight (optional; kept for completeness).
     """
     a = +LANE_STEER_DEG if right else -LANE_STEER_DEG
     t1 = CELL_RUNUP_CM * TIME_PER_CM * LANE_SPLIT_1
@@ -223,12 +215,13 @@ def lane_change(px, right=True):
 
 def three_point_turn_90(px, left=True):
     """
-    Your requested 90° turn: reverse with +/−30°, then forward with the opposite +/−30°.
-    This does NOT truly rotate in place; it approximates a tight heading change with
-    minimal lateral drift. Tune THREE_PT_TIME_S on your floor.
+    90° turn as a 3-point maneuver:
+      1) reverse with steering a1 = ∓30°
+      2) forward with steering a2 = ±30°
+    Tune THREE_PT_TIME_S for your floor.
     """
-    a1 = -THREE_PT_STEER_DEG if left else +THREE_PT_STEER_DEG  # first leg steering while reversing
-    a2 = +THREE_PT_STEER_DEG if left else -THREE_PT_STEER_DEG  # second leg steering while moving forward
+    a1 = -THREE_PT_STEER_DEG if left else +THREE_PT_STEER_DEG
+    a2 = +THREE_PT_STEER_DEG if left else -THREE_PT_STEER_DEG
 
     # Leg 1: reverse with steering a1
     _wait_set_steer(px, a1)
@@ -246,12 +239,10 @@ def three_point_turn_90(px, left=True):
 
 def execute_next_step(px, path, start_cell, last_step_vec):
     """
-    Execute one grid step. We look at the next cell relative to current cell and:
-      - If moving straight 'forward' (dy=-1, dx=0): drive_forward_cell()
-      - If moving lateral (dx != 0) or backward (dy=+1): 
-            if it's a 90° change from last_step_vec, do a 3-point 90° turn
-            otherwise, perform a gentle lane_change (ends straight)
-    Returns the new last_step_vec used next iteration.
+    Execute one grid step and return new last_step_vec.
+    - Forward (dy=-1,dx=0): drive_forward_cell()
+    - Lateral (dx!=0) or backward (dy=+1): if 90° from last move, do 3-point turn;
+      else do gentle lane change.
     """
     if path is None or len(path) < 2:
         return last_step_vec
@@ -265,21 +256,18 @@ def execute_next_step(px, path, start_cell, last_step_vec):
         drive_forward_cell(px)
         return (-1, 0)
 
-    # Backward step (rare in planner; but handle if occurs)
+    # Backward step (rare in planner, but supported)
     if dy == 1 and dx == 0:
-        # Use a 3-point to "about-face-ish" then move, or just reverse one cell:
-        # Here we keep it simple: reverse straight one cell.
         _wait_set_steer(px, 0)
         px.backward(DRIVE_POWER)
         time.sleep(CELL_RUNUP_CM * TIME_PER_CM)
         px.stop()
         return (1, 0)
 
-    # Lateral step (E/W). Decide between 3-point 90° vs gentle lane change.
+    # Lateral step (E/W)
     is_right = (dx == +1)
     is_left  = (dx == -1)
 
-    # Detect 90° change from last motion: if last was forward/back and now lateral, or vice versa.
     def is_perpendicular(v1, v2):
         if v1 is None or v2 is None:
             return True
@@ -288,97 +276,88 @@ def execute_next_step(px, path, start_cell, last_step_vec):
         return (px_ * qx_ + py * qy) == 0  # dot product == 0
 
     if is_perpendicular(last_step_vec, (dy, dx)):
-        # Do your requested 3-point 90° turn: choose left/right
+        # Your requested 3-point 90° turn
         three_point_turn_90(px, left=is_left)
-        # After the maneuver, roll a short straight to "occupy" the next cell
+        # Roll forward one cell to occupy target column cleanly
         drive_forward_cell(px)
     else:
-        # Small lateral without hard turn
         lane_change(px, right=is_right)
 
     return (dy, dx)
 
 # =========================
-# Simple prompt
+# Prompt utilities
 # =========================
-def prompt_destination_cm():
-    print("Enter destination in ROBOT frame (centimeters).")
-    print("  x: right is positive; left is negative")
-    print("  y: forward is positive; behind is negative (keep positive for this demo)")
+def prompt_destination_cell():
+    """
+    Ask the user for a destination GRID CELL, not centimeters, to avoid relying on world_to_grid.
+    Returns (gy, gx) as (row, col).
+    """
+    print(f"Enter destination grid cell indices (gy, gx). Grid size is HEIGHT={HEIGHT} (rows), WIDTH={WIDTH} (cols).")
+    print("  gy: 0 is top row, increases downward; gx: 0 is left column, increases rightward.")
     while True:
         try:
-            x = float(input("Destination X (cm): ").strip())
-            y = float(input("Destination Y (cm): ").strip())
-            return x, y
+            gy = int(input("Destination gy (row, 0..HEIGHT-1): ").strip())
+            gx = int(input("Destination gx (col, 0..WIDTH-1): ").strip())
+            if 0 <= gy < HEIGHT and 0 <= gx < WIDTH:
+                return (gy, gx)
+            else:
+                print("Out of bounds. Please enter values within the grid size.\n")
         except ValueError:
-            print("Please enter numeric values (e.g., 0 or 80 or -20). Try again.\n")
+            print("Please enter integer values.\n")
 
 # =========================
-# Main
+# Main loop
 # =========================
 def main():
-    # Prompt for destination
-    dest_x_cm, dest_y_cm = prompt_destination_cm()
+    # Ask for destination cell (gy, gx)
+    requested_goal = prompt_destination_cell()
 
     # Init car
     px = Picarx()
     np.set_printoptions(linewidth=140, threshold=np.inf)
 
-    # Assume robot starts at bottom-center, facing "up" the grid
+    # Robot starts at bottom-center, facing "up" the grid
     start_cell_origin = (HEIGHT - 1, WIDTH // 2)
     start_cell        = tuple(start_cell_origin)
-
-    # Convert requested destination to goal cell once
-    requested_goal = destination_to_goal_cell(dest_x_cm, dest_y_cm, WIDTH, HEIGHT, RES_CM)
-
-    last_step_vec = None  # track last (dy,dx) we executed
+    last_step_vec     = None
 
     try:
         while True:
-            # --- Ensure car is stationary during scan ---
-            _wait_set_steer(px, STRAIGHT_DEG)
+            # Ensure car is stationary during scan
+            _wait_set_steer(px, 0)
             px.stop()
             time.sleep(0.05)
 
-            # 1) Sense: build occupancy (stationary)
+            # 1) Sense: build occupancy (expects your build_map elsewhere)
+            # NOTE: This function is intentionally NOT included here per your request.
             occ = build_map(px, width=WIDTH, height=HEIGHT, res_cm=RES_CM)
-
-            print("\n--- Occupancy grid (0=free, 1=occupied) ---")
-            print(occ)
-            print("-------------------------------------------")
 
             # 2) Inflate obstacles (forward-biased)
             costmap = inflate_obstacles(occ, INFLATE_SIDE_CELLS, INFLATE_FWD_CELLS, INFLATE_BACK_CELLS)
 
-            print("\n--- Inflated grid -------------------------")
-            print(costmap)
-            print("-------------------------------------------")
-
-            # 3) Position estimates (fake odom from cells)
-            cur_x_cm, cur_y_cm = cell_to_world_cm(
-                cell_y=start_cell[0],
-                cell_x=start_cell[1],
-                start_y=start_cell_origin[0],
-                start_x=start_cell_origin[1],
-                res_cm=RES_CM
-            )
-            dx = dest_x_cm - cur_x_cm
-            dy = dest_y_cm - cur_y_cm
-            dist_to_dest = math.hypot(dx, dy)
-            print(f"Position from origin (cm): x={cur_x_cm:.1f}, y={cur_y_cm:.1f}")
-            print(f"Distance to destination (cm): {dist_to_dest:.1f}")
-            print("-------------------------------------------")
-
-            # 4) Snap requested goal to nearest free cell
+            # 3) Snap requested goal to nearest free cell
             gy_req, gx_req = requested_goal
-            goal = nearest_free_cell(costmap, gy_req, gx_req, max_radius=10)
-            if goal is None:
-                px.stop()
-                print("No reachable goal vicinity; rescanning...")
-                time.sleep(0.3)
-                continue
+            goal = (gy_req, gx_req)
+            if costmap[gy_req, gx_req] == 1:
+                # Search outward in Manhattan rings
+                goal = None
+                h, w = costmap.shape
+                for r in range(1, 11):
+                    found = False
+                    for dy in range(-r, r + 1):
+                        dx = r - abs(dy)
+                        for sx, sy in ((gx_req + dx, gy_req + dy), (gx_req - dx, gy_req + dy)):
+                            if 0 <= sy < h and 0 <= sx < w and costmap[sy, sx] == 0:
+                                goal = (sy, sx); found = True; break
+                        if found: break
+                    if found: break
+                if goal is None:
+                    print("No reachable free goal cell vicinity; rescanning...")
+                    time.sleep(0.3)
+                    continue
 
-            # 5) Plan with A*
+            # 4) Plan with A*
             path = a_star(costmap, start_cell, goal)
             if path is None or len(path) < 2:
                 px.stop()
@@ -386,19 +365,58 @@ def main():
                 time.sleep(0.3)
                 continue
 
-            # Arrived check: if we're already at goal cell (or one step away), stop.
-            if (start_cell == goal) or (len(path) <= 2):
+            # --- Status / progress print BEFORE moving ---
+            cells_remaining = len(path) - 1
+            # Compute pose in cm relative to start origin for visibility
+            x_cm, y_cm = cell_to_world_cm(
+                cell_y=start_cell[0],
+                cell_x=start_cell[1],
+                start_y=start_cell_origin[0],
+                start_x=start_cell_origin[1],
+                res_cm=RES_CM
+            )
+            # Distance to destination in cells→cm
+            gy_goal, gx_goal = goal
+            cell_dist = math.hypot(gx_goal - start_cell[1], gy_goal - start_cell[0])
+            dist_to_dest = cell_dist * RES_CM
+
+            print("\n--- STATUS (pre-move) ---")
+            print(f"Current cell: {start_cell} | World approx: x={x_cm:.1f} cm, y={y_cm:.1f} cm")
+            print(f"Goal cell:    {goal}")
+            print(f"Cells remaining: {cells_remaining}")
+            print(f"Distance to destination: {dist_to_dest:.1f} cm")
+
+            # 5) Arrived check (metric)
+            if dist_to_dest <= ARRIVE_CM or cells_remaining <= 1:
                 px.stop()
-                print("Arrived at destination vicinity.")
+                print(f"Arrived: within {ARRIVE_CM:.1f} cm (or one step) of destination.")
                 break
 
-            # 6) Execute exactly one step (uses 3-point turn on 90° changes)
+            # 6) Execute exactly one step
             last_step_vec = execute_next_step(px, path, start_cell, last_step_vec)
 
-            # 7) Advance our internal "pose" by consuming the next path cell (fake odometry)
+            # 7) Advance internal pose by consuming the next path cell
             start_cell = path[1]
 
-            # Loop back to scan again (stationary) and replan
+            # --- Status / progress print AFTER moving ---
+            x_cm, y_cm = cell_to_world_cm(
+                cell_y=start_cell[0],
+                cell_x=start_cell[1],
+                start_y=start_cell_origin[0],
+                start_x=start_cell_origin[1],
+                res_cm=RES_CM
+            )
+            gy_goal, gx_goal = goal
+            cell_dist = math.hypot(gx_goal - start_cell[1], gy_goal - start_cell[0])
+            dist_to_dest = cell_dist * RES_CM
+
+            print("\n--- STATUS (post-move) ---")
+            print(f"Current cell: {start_cell} | World approx: x={x_cm:.1f} cm, y={y_cm:.1f} cm")
+            print(f"Cells remaining: {max(0, cells_remaining-1)}")
+            print(f"Distance to destination: {dist_to_dest:.1f} cm")
+            print("-----------------------------")
+
+            # Loop: scan → plan → move → print → repeat
 
     finally:
         try:
